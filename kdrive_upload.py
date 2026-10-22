@@ -317,13 +317,14 @@ class KDrive:
         )
         token = started["data"]["token"]
         try:
-            upload_url = check_upload_url(started["data"]["upload_url"])
+            # upload_url is only the upload host; the chunk endpoint path is appended to it
+            chunk_url = f"{check_upload_url(started['data']['upload_url']).rstrip('/')}/3/drive/{self._drive_id}/upload/session/{token}/chunk"
             for number, offset in enumerate(offsets, 1):
                 length = min(SESSION_CHUNK_SIZE, size - offset)
                 await self._call(
                     Method.POST,
                     "/upload/session/chunk",
-                    url=upload_url,
+                    url=chunk_url,
                     params={"chunk_number": number, "chunk_size": length},
                     data=read_chunks(path, length, offset),
                     headers={"Content-Type": "application/octet-stream", "Content-Length": str(length)},

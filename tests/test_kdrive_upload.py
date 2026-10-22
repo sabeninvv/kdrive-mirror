@@ -123,7 +123,7 @@ class FakeDrive(KDrive):
     async def _call(self, method, path, *, url=None, **kwargs):
         self.calls.append((method, path, url, kwargs.get("json"), kwargs.get("params")))
         if path.endswith("/start"):
-            return {"data": {"token": "tok", "upload_url": "https://upload.infomaniak.com/chunk"}}
+            return {"data": {"token": "tok", "upload_url": "https://1-1-v3-1.upload.kdrive.infomaniak.com"}}
         if path.endswith("/chunk"):
             if kwargs["params"]["chunk_number"] == self.fail_on_chunk:
                 raise KDriveError("boom")
@@ -143,7 +143,7 @@ def test_upload_session_sends_sequential_chunks(tmp_path, monkeypatch):
     start = drive.calls[0]
     assert start[1] == "/upload/session/start" and start[3]["total_chunks"] == 3 and start[3]["total_size"] == 10
     assert [c[4]["chunk_number"] for c in drive.calls[1:4]] == [1, 2, 3]
-    assert {c[2] for c in drive.calls[1:4]} == {"https://upload.infomaniak.com/chunk"}
+    assert {c[2] for c in drive.calls[1:4]} == {"https://1-1-v3-1.upload.kdrive.infomaniak.com/3/drive/1/upload/session/tok/chunk"}
     assert drive.calls[-1][1] == "/upload/session/tok/finish"
 
 
