@@ -294,5 +294,5 @@ def test_checkpoint_due():
 
 
 def test_format_upload() -> None:
-    line = format_upload(3211 * 1024 * 1024, 0.01, Path("/d/f.txt"))
+    line = format_upload("upload", 3211 * 1024 * 1024, 0.01, Path("/d/f.txt"))
     assert line == "upload   3211 Mb in    0.01 sec /d/f.txt"

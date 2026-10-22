@@ -171,8 +171,8 @@ def check_delete_limit(count: int, total: int, max_pct: float) -> None:
         raise KDriveError(f"refusing to delete {count} of {total} entries: more than {max_pct}% (see --max-delete-pct)")
 
 
-def format_upload(size: int, seconds: float, path: Path) -> str:
-    return f"upload {size / MIB:6.0f} Mb in {seconds:7.2f} sec {path}"
+def format_upload(status: str, size: int, seconds: float, path: Path) -> str:
+    return f"{status} {size / MIB:6.0f} Mb in {seconds:7.2f} sec {path}"
 
 
 def check_upload_url(url: str) -> str:
@@ -384,23 +384,23 @@ class KDrive:
         if self._dry_run:
             logger.info("would upload %s", path)
             return
-        try:
-            # the slot is held for the whole file so the logged time excludes waiting in the queue
-            async with self._slots:
-                started = time.monotonic()
+        # the slot is held for the whole file so the logged time excludes waiting in the queue
+        async with self._slots:
+            started = time.monotonic()
+            try:
                 entry = await self._send(dir_id, item, path)
-                elapsed = time.monotonic() - started
-        except (KDriveError, aiohttp.ClientError, TimeoutError, SourceChanged) as exc:
-            # aiohttp wraps an exception from the body generator in ClientConnectionError; the cause is in __cause__
-            cause = exc if isinstance(exc, SourceChanged) else exc.__cause__
-            if isinstance(cause, SourceChanged):
-                logger.warning("skip %s: removed or truncated during sync, next run will retry", path)
-            else:
-                logger.error("failed %s (%r)", path, exc)
-                self.failures.append((path, exc))
-            return
+            except (KDriveError, aiohttp.ClientError, TimeoutError, SourceChanged) as exc:
+                # aiohttp wraps an exception from the body generator in ClientConnectionError; the cause is in __cause__
+                cause = exc if isinstance(exc, SourceChanged) else exc.__cause__
+                if isinstance(cause, SourceChanged):
+                    logger.warning("skip %s: removed or truncated during sync, next run will retry", path)
+                else:
+                    logger.error("%s (%r)", format_upload("failed", item.size, time.monotonic() - started, path), exc)
+                    self.failures.append((path, exc))
+                return
+            elapsed = time.monotonic() - started
         self._tree[rel][entry.name] = entry
-        logger.info(format_upload(item.size, elapsed, path))
+        logger.info(format_upload("upload", item.size, elapsed, path))
         await self._changed()
 
     def report_failures(self) -> None:
