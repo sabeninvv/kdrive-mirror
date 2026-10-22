@@ -205,6 +205,34 @@ def test_send_retries_dropped_connection(tmp_path, monkeypatch):
     assert drive.attempts == 3  # gives up after UPLOAD_ATTEMPTS
 
 
+class FailingSendDrive(FakeDrive):
+    def __init__(self, root, error):
+        super().__init__(root)
+        self.error = error
+        self._tree[""] = {}
+
+    async def _send(self, dir_id, item, path):
+        raise self.error
+
+
+def test_upload_file_collects_failures_instead_of_raising(tmp_path, caplog):
+    item = Local("f", False, 1, 1)
+    for error in (KDriveError("denied", "forbidden_error"), aiohttp.ServerDisconnectedError(), TimeoutError()):
+        drive = FailingSendDrive(tmp_path, error)
+        asyncio.run(drive.upload_file("", item, 1))
+        assert drive.failures == [(tmp_path / "f", error)]
+        assert drive._tree[""] == {}
+    caplog.set_level("ERROR")
+    drive.report_failures()
+    assert "1 file(s) were not uploaded" in caplog.text and str(tmp_path / "f") in caplog.text
+
+
+def test_upload_file_does_not_count_vanished_source_as_failure(tmp_path):
+    drive = FailingSendDrive(tmp_path, SourceChanged("f"))
+    asyncio.run(drive.upload_file("", Local("f", False, 1, 1), 1))
+    assert drive.failures == []
+
+
 def test_send_does_not_retry_api_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(kdrive_upload, "RETRY_DELAY_SEC", 0)
     drive = FlakyDrive(tmp_path, [KDriveError("denied", "forbidden_error")])

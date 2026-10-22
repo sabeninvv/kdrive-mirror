@@ -231,6 +231,7 @@ class KDrive:
         self._seen = 0
         self._extras: list[tuple[str, Entry]] = []
         self.api_calls = 0
+        self.failures: list[tuple[Path, Exception]] = []
 
     async def _call(
         self, method: Method, path: str, *, api_version: int = 3, limited: bool = True, url: str | None = None, **kwargs
@@ -389,16 +390,25 @@ class KDrive:
                 started = time.monotonic()
                 entry = await self._send(dir_id, item, path)
                 elapsed = time.monotonic() - started
-        except (aiohttp.ClientConnectionError, SourceChanged) as exc:
+        except (KDriveError, aiohttp.ClientError, TimeoutError, SourceChanged) as exc:
             # aiohttp wraps an exception from the body generator in ClientConnectionError; the cause is in __cause__
             cause = exc if isinstance(exc, SourceChanged) else exc.__cause__
-            if not isinstance(cause, SourceChanged):
-                raise
-            logger.warning("skip %s: removed or truncated during sync, next run will retry", path)
+            if isinstance(cause, SourceChanged):
+                logger.warning("skip %s: removed or truncated during sync, next run will retry", path)
+            else:
+                logger.error("failed %s (%r)", path, exc)
+                self.failures.append((path, exc))
             return
         self._tree[rel][entry.name] = entry
         logger.info(format_upload(item.size, elapsed, path))
         await self._changed()
+
+    def report_failures(self) -> None:
+        if not self.failures:
+            return
+        logger.error("%d file(s) were not uploaded:", len(self.failures))
+        for path, exc in self.failures:
+            logger.error("  %s: %r", path, exc)
 
     async def delete(self, rel: str, entry: Entry) -> None:
         path = self._root / rel / entry.name
@@ -577,7 +587,10 @@ async def main(args: argparse.Namespace) -> None:
         finally:
             if args.manifest:
                 await drive.save_manifest()
+            drive.report_failures()
         logger.info("api calls: %d", drive.api_calls)
+        if drive.failures:
+            sys.exit(f"{len(drive.failures)} file(s) were not uploaded, see the list above")
 
 
 if __name__ == "__main__":
