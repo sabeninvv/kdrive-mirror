@@ -5,12 +5,15 @@ import pytest
 
 import pathspec
 
+import kdrive_upload
 from kdrive_upload import (
     Entry,
+    KDrive,
     KDriveError,
     Local,
     SourceChanged,
     check_delete_limit,
+    check_upload_url,
     checkpoint_due,
     dump_manifest,
     is_current,
@@ -85,6 +88,70 @@ def test_read_chunks_sends_exactly_size_and_detects_shrink(tmp_path):
         collect(f, 20)  # the file became shorter than in the snapshot
     with pytest.raises(SourceChanged):
         collect(tmp_path / "gone", 1)  # the file vanished
+
+
+def test_read_chunks_offset(tmp_path):
+    f = tmp_path / "f"
+    f.write_bytes(b"0123456789")
+
+    async def run(offset, size):
+        return b"".join([chunk async for chunk in read_chunks(f, size, offset)])
+
+    assert asyncio.run(run(4, 3)) == b"456"
+    with pytest.raises(SourceChanged):
+        asyncio.run(run(8, 5))  # the file became shorter than offset + size
+
+
+def test_check_upload_url():
+    assert check_upload_url("https://upload.infomaniak.com/x") == "https://upload.infomaniak.com/x"
+    for bad in ("http://upload.infomaniak.com/x", "https://evil.example/x", "https://infomaniak.com.evil.example/x"):
+        with pytest.raises(KDriveError):
+            check_upload_url(bad)
+
+
+class FakeDrive(KDrive):
+    """KDrive whose API calls are recorded instead of sent; chunk bodies are consumed like aiohttp would."""
+
+    def __init__(self, root, fail_on_chunk=None):
+        super().__init__(None, 1, 1, root, {}, mirror=False, dry_run=False, manifest=False, checkpoint_sec=0)
+        self.calls = []
+        self.chunks = []
+        self.fail_on_chunk = fail_on_chunk
+
+    async def _call(self, method, path, *, url=None, **kwargs):
+        self.calls.append((method, path, url, kwargs.get("json"), kwargs.get("params")))
+        if path.endswith("/start"):
+            return {"data": {"token": "tok", "upload_url": "https://upload.infomaniak.com/chunk"}}
+        if path.endswith("/chunk"):
+            if kwargs["params"]["chunk_number"] == self.fail_on_chunk:
+                raise KDriveError("boom")
+            self.chunks.append(b"".join([c async for c in kwargs["data"]]))
+        if path.endswith("/finish"):
+            return {"data": {"file": {"id": 7, "name": "big", "type": "file", "size": 10, "last_modified_at": 5}}}
+        return {}
+
+
+def test_upload_session_sends_sequential_chunks(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdrive_upload, "SESSION_CHUNK_SIZE", 4)
+    (tmp_path / "big").write_bytes(b"0123456789")
+    drive = FakeDrive(tmp_path)
+    entry = asyncio.run(drive._upload_session(3, "big", tmp_path / "big", 10, 5))
+    assert drive.chunks == [b"0123", b"4567", b"89"]
+    assert entry == Entry(7, "big", False, 10, 5)
+    start = drive.calls[0]
+    assert start[1] == "/upload/session/start" and start[3]["total_chunks"] == 3 and start[3]["total_size"] == 10
+    assert [c[4]["chunk_number"] for c in drive.calls[1:4]] == [1, 2, 3]
+    assert {c[2] for c in drive.calls[1:4]} == {"https://upload.infomaniak.com/chunk"}
+    assert drive.calls[-1][1] == "/upload/session/tok/finish"
+
+
+def test_upload_session_is_cancelled_on_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdrive_upload, "SESSION_CHUNK_SIZE", 4)
+    (tmp_path / "big").write_bytes(b"0123456789")
+    drive = FakeDrive(tmp_path, fail_on_chunk=2)
+    with pytest.raises(KDriveError):
+        asyncio.run(drive._upload_session(3, "big", tmp_path / "big", 10, 5))
+    assert drive.calls[-1][:2] == ("DELETE", "/upload/session/tok")
 
 
 def test_checkpoint_due():

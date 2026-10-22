@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator
 from dataclasses import astuple, dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 import aiofiles
 import aiohttp
@@ -34,6 +35,9 @@ API = "https://api.infomaniak.com"
 ROOT_ID = 1
 DEFAULT_IGNORE_FILE = Path(__file__).with_name("kdrive.ignore")
 CHUNK_SIZE = 1 << 20
+MAX_DIRECT_SIZE = 1_000_000_000  # POST /upload rejects a larger total_size; such files go through an upload session
+SESSION_CHUNK_SIZE = 128 * CHUNK_SIZE  # the API takes 1 MB..1 GB per chunk (the last may be smaller) and up to 10000 chunks
+UPLOAD_HOST_SUFFIX = ".infomaniak.com"
 NOT_FOUND = "object_not_found"
 SERVICE_DIR = ".kdrive-sync"
 MANIFEST_NAME = "manifest.json.gz"
@@ -155,11 +159,20 @@ def check_delete_limit(count: int, total: int, max_pct: float) -> None:
         raise KDriveError(f"refusing to delete {count} of {total} entries: more than {max_pct}% (see --max-delete-pct)")
 
 
-async def read_chunks(path: Path, size: int) -> AsyncIterator[bytes]:
+def check_upload_url(url: str) -> str:
+    """The session's Authorization header is sent to upload_url, so only an HTTPS Infomaniak host is accepted."""
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not (parts.hostname or "").endswith(UPLOAD_HOST_SUFFIX):
+        raise KDriveError(f"unexpected upload_url {url!r}")
+    return url
+
+
+async def read_chunks(path: Path, size: int, offset: int = 0) -> AsyncIterator[bytes]:
     """Yields exactly size bytes from the snapshot: a grown file is cut off, a vanished or shortened one raises SourceChanged."""
     remaining = size
     try:
         async with aiofiles.open(path, "rb") as f:
+            await f.seek(offset)
             while remaining:
                 chunk = await f.read(min(CHUNK_SIZE, remaining))
                 if not chunk:
@@ -203,8 +216,10 @@ class KDrive:
         self._extras: list[tuple[str, Entry]] = []
         self.api_calls = 0
 
-    async def _call(self, method: Method, path: str, *, api_version: int = 3, limited: bool = True, **kwargs) -> dict:
-        url = f"{API}/{api_version}/drive/{self._drive_id}{path}"
+    async def _call(
+        self, method: Method, path: str, *, api_version: int = 3, limited: bool = True, url: str | None = None, **kwargs
+    ) -> dict:
+        url = url or f"{API}/{api_version}/drive/{self._drive_id}{path}"
         self.api_calls += 1
         slot = self._slots if limited else contextlib.nullcontext()
         async with slot, self._session.request(method, url, **kwargs) as resp:
@@ -269,13 +284,57 @@ class KDrive:
         )
         return to_entry(page["data"])
 
+    async def _upload_session(self, dir_id: int | None, name: str, path: Path, size: int, mtime: int) -> Entry:
+        """Uploads a file over MAX_DIRECT_SIZE as sequential chunks; a failed session is cancelled so no partial file is left."""
+        # ponytail: chunks go one by one and a failed file restarts from chunk 1, no resume; parallel/resumable chunks if links are slow and files huge
+        offsets = range(0, size, SESSION_CHUNK_SIZE)
+        started = await self._call(
+            Method.POST,
+            "/upload/session/start",
+            json={
+                "directory_id": dir_id,
+                "file_name": name,
+                "total_size": size,
+                "total_chunks": len(offsets),
+                "last_modified_at": mtime,
+                "conflict": "version",
+            },
+        )
+        token = started["data"]["token"]
+        try:
+            upload_url = check_upload_url(started["data"]["upload_url"])
+            for number, offset in enumerate(offsets, 1):
+                length = min(SESSION_CHUNK_SIZE, size - offset)
+                await self._call(
+                    Method.POST,
+                    "/upload/session/chunk",
+                    url=upload_url,
+                    params={"chunk_number": number, "chunk_size": length},
+                    data=read_chunks(path, length, offset),
+                    headers={"Content-Type": "application/octet-stream", "Content-Length": str(length)},
+                )
+            finished = await self._call(Method.POST, f"/upload/session/{token}/finish")
+        except BaseException:
+            await self._cancel_session(token)
+            raise
+        return to_entry(finished["data"]["file"])
+
+    async def _cancel_session(self, token: str) -> None:
+        try:
+            await self._call(Method.DELETE, f"/upload/session/{token}")
+        except (KDriveError, aiohttp.ClientError) as exc:
+            logger.warning("session %s not cancelled (%r), it expires on its own", token, exc)
+
     async def upload_file(self, rel: str, item: Local, dir_id: int | None) -> None:
         path = self._root / rel / item.name
         if self._dry_run:
             logger.info("would upload %s", path)
             return
         try:
-            entry = await self._upload(dir_id, item.name, read_chunks(path, item.size), item.size, item.mtime)
+            if item.size > MAX_DIRECT_SIZE:
+                entry = await self._upload_session(dir_id, item.name, path, item.size, item.mtime)
+            else:
+                entry = await self._upload(dir_id, item.name, read_chunks(path, item.size), item.size, item.mtime)
         except (aiohttp.ClientConnectionError, SourceChanged) as exc:
             # aiohttp wraps an exception from the body generator in ClientConnectionError; the cause is in __cause__
             cause = exc if isinstance(exc, SourceChanged) else exc.__cause__

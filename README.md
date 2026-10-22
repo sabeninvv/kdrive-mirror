@@ -266,7 +266,7 @@ Exclusions protect against accidentally uploading secrets but do not replace a c
 - Deleting an extra folder counts as one entry, not as the number of files inside; the trash is the safety net.
 - Without `--mirror` the script only adds files and versions.
 - A file and a folder with the same name in `--src` and on the drive are not handled.
-- Tested on small and medium files. Very large files (gigabytes) have not been tested.
+- Files over 1 GB (the `POST /upload` limit) are sent through a kDrive upload session: 128 MiB chunks one after another, then `finish`. If any chunk fails, the session is cancelled and the whole file restarts from the first chunk on the next run. The session path is covered by unit tests with a stubbed API and has not yet been run against a real drive.
 
 ## Tests
 
