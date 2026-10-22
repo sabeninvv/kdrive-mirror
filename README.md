@@ -261,7 +261,7 @@ Exclusions protect against accidentally uploading secrets but do not replace a c
 
 ## Limitations
 
-- There are no retries: on a request error the script stops. A repeat run skips what is already uploaded.
+- A file is retried (up to 3 attempts, 5 and 10 seconds apart, from the start of the file) only when the connection drops or the host cannot be reached. Any other request error, including an API error, stops the script. A repeat run skips what is already uploaded.
 - The comparison uses name, size and modification time (to the second), not content. An edit that keeps the size within the same second is not detected.
 - Deleting an extra folder counts as one entry, not as the number of files inside; the trash is the safety net.
 - Without `--mirror` the script only adds files and versions.

@@ -39,6 +39,9 @@ CHUNK_SIZE = MIB
 MAX_DIRECT_SIZE = 1_000_000_000  # POST /upload rejects a larger total_size; such files go through an upload session
 SESSION_CHUNK_SIZE = 128 * CHUNK_SIZE  # the API takes 1 MB..1 GB per chunk (the last may be smaller) and up to 10000 chunks
 UPLOAD_HOST_SUFFIX = ".infomaniak.com"
+UPLOAD_ATTEMPTS = 3
+RETRY_DELAY_SEC = 5
+RETRYABLE = (aiohttp.ServerConnectionError, aiohttp.ClientConnectorError)  # not the plain ClientConnectionError that wraps SourceChanged
 NOT_FOUND = "object_not_found"
 ALREADY_EXISTS = "destination_already_exists"
 SERVICE_DIR = ".kdrive-sync"
@@ -346,6 +349,21 @@ class KDrive:
         except (KDriveError, aiohttp.ClientError) as exc:
             logger.warning("session %s not cancelled (%r), it expires on its own", token, exc)
 
+    async def _send_once(self, dir_id: int | None, item: Local, path: Path) -> Entry:
+        if item.size > MAX_DIRECT_SIZE:
+            return await self._upload_session(dir_id, item.name, path, item.size, item.mtime)
+        return await self._upload(dir_id, item.name, read_chunks(path, item.size), item.size, item.mtime, limited=False)
+
+    async def _send(self, dir_id: int | None, item: Local, path: Path) -> Entry:
+        """Sends a file; a dropped or unreachable connection restarts the file (the body stream cannot be resumed)."""
+        for attempt in range(1, UPLOAD_ATTEMPTS):
+            try:
+                return await self._send_once(dir_id, item, path)
+            except RETRYABLE as exc:
+                logger.warning("retry %d/%d %s (%r)", attempt, UPLOAD_ATTEMPTS - 1, path, exc)
+                await asyncio.sleep(RETRY_DELAY_SEC * attempt)
+        return await self._send_once(dir_id, item, path)
+
     async def upload_file(self, rel: str, item: Local, dir_id: int | None) -> None:
         path = self._root / rel / item.name
         if self._dry_run:
@@ -355,12 +373,7 @@ class KDrive:
             # the slot is held for the whole file so the logged time excludes waiting in the queue
             async with self._slots:
                 started = time.monotonic()
-                if item.size > MAX_DIRECT_SIZE:
-                    entry = await self._upload_session(dir_id, item.name, path, item.size, item.mtime)
-                else:
-                    entry = await self._upload(
-                        dir_id, item.name, read_chunks(path, item.size), item.size, item.mtime, limited=False
-                    )
+                entry = await self._send(dir_id, item, path)
                 elapsed = time.monotonic() - started
         except (aiohttp.ClientConnectionError, SourceChanged) as exc:
             # aiohttp wraps an exception from the body generator in ClientConnectionError; the cause is in __cause__

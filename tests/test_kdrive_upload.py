@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import aiohttp
 import pathspec
 
 import kdrive_upload
@@ -176,6 +177,39 @@ def test_ensure_dir_takes_existing_folder_missing_from_stale_manifest(tmp_path):
     file_with_same_name = Entry(10, "sub", False, 5, 1)
     with pytest.raises(KDriveError):
         asyncio.run(ExistingDirDrive(tmp_path, [file_with_same_name]).ensure_dir(1, "sub", []))
+
+
+class FlakyDrive(FakeDrive):
+    def __init__(self, root, failures):
+        super().__init__(root)
+        self.failures = failures
+        self.attempts = 0
+
+    async def _send_once(self, dir_id, item, path):
+        self.attempts += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return Entry(1, item.name, False, item.size, item.mtime)
+
+
+def test_send_retries_dropped_connection(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdrive_upload, "RETRY_DELAY_SEC", 0)
+    item = Local("f", False, 1, 1)
+    drive = FlakyDrive(tmp_path, [aiohttp.ServerDisconnectedError(), aiohttp.ServerDisconnectedError()])
+    assert asyncio.run(drive._send(1, item, tmp_path / "f")).id == 1
+    assert drive.attempts == 3  # two failures, then success
+    drive = FlakyDrive(tmp_path, [aiohttp.ServerDisconnectedError()] * 3)
+    with pytest.raises(aiohttp.ServerDisconnectedError):
+        asyncio.run(drive._send(1, item, tmp_path / "f"))
+    assert drive.attempts == 3  # gives up after UPLOAD_ATTEMPTS
+
+
+def test_send_does_not_retry_api_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdrive_upload, "RETRY_DELAY_SEC", 0)
+    drive = FlakyDrive(tmp_path, [KDriveError("denied", "forbidden_error")])
+    with pytest.raises(KDriveError):
+        asyncio.run(drive._send(1, Local("f", False, 1, 1), tmp_path / "f"))
+    assert drive.attempts == 1
 
 
 def test_checkpoint_due():
