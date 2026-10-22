@@ -300,7 +300,10 @@ class KDrive:
         return to_entry(page["data"])
 
     async def _upload_session(self, dir_id: int | None, name: str, path: Path, size: int, mtime: int) -> Entry:
-        """Uploads a file over MAX_DIRECT_SIZE as sequential chunks; a failed session is cancelled so no partial file is left."""
+        """Uploads a file over MAX_DIRECT_SIZE as sequential chunks; a failed session is cancelled so no partial file is left.
+
+        The caller holds the concurrency slot, so these calls are unlimited.
+        """
         # ponytail: chunks go one by one and a failed file restarts from chunk 1, no resume; parallel/resumable chunks if links are slow and files huge
         offsets = range(0, size, SESSION_CHUNK_SIZE)
         started = await self._call(
@@ -314,6 +317,7 @@ class KDrive:
                 "last_modified_at": mtime,
                 "conflict": "version",
             },
+            limited=False,
         )
         token = started["data"]["token"]
         try:
@@ -328,8 +332,9 @@ class KDrive:
                     params={"chunk_number": number, "chunk_size": length},
                     data=read_chunks(path, length, offset),
                     headers={"Content-Type": "application/octet-stream", "Content-Length": str(length)},
+                    limited=False,
                 )
-            finished = await self._call(Method.POST, f"/upload/session/{token}/finish")
+            finished = await self._call(Method.POST, f"/upload/session/{token}/finish", limited=False)
         except BaseException:
             await self._cancel_session(token)
             raise
@@ -337,7 +342,7 @@ class KDrive:
 
     async def _cancel_session(self, token: str) -> None:
         try:
-            await self._call(Method.DELETE, f"/upload/session/{token}")
+            await self._call(Method.DELETE, f"/upload/session/{token}", limited=False)
         except (KDriveError, aiohttp.ClientError) as exc:
             logger.warning("session %s not cancelled (%r), it expires on its own", token, exc)
 
@@ -346,12 +351,17 @@ class KDrive:
         if self._dry_run:
             logger.info("would upload %s", path)
             return
-        started = time.monotonic()
         try:
-            if item.size > MAX_DIRECT_SIZE:
-                entry = await self._upload_session(dir_id, item.name, path, item.size, item.mtime)
-            else:
-                entry = await self._upload(dir_id, item.name, read_chunks(path, item.size), item.size, item.mtime)
+            # the slot is held for the whole file so the logged time excludes waiting in the queue
+            async with self._slots:
+                started = time.monotonic()
+                if item.size > MAX_DIRECT_SIZE:
+                    entry = await self._upload_session(dir_id, item.name, path, item.size, item.mtime)
+                else:
+                    entry = await self._upload(
+                        dir_id, item.name, read_chunks(path, item.size), item.size, item.mtime, limited=False
+                    )
+                elapsed = time.monotonic() - started
         except (aiohttp.ClientConnectionError, SourceChanged) as exc:
             # aiohttp wraps an exception from the body generator in ClientConnectionError; the cause is in __cause__
             cause = exc if isinstance(exc, SourceChanged) else exc.__cause__
@@ -360,7 +370,7 @@ class KDrive:
             logger.warning("skip %s: removed or truncated during sync, next run will retry", path)
             return
         self._tree[rel][entry.name] = entry
-        logger.info(format_upload(item.size, time.monotonic() - started, path))
+        logger.info(format_upload(item.size, elapsed, path))
         await self._changed()
 
     async def delete(self, rel: str, entry: Entry) -> None:
@@ -545,4 +555,8 @@ async def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    asyncio.run(main(parse_args()))
+    started = time.monotonic()
+    try:
+        asyncio.run(main(parse_args()))
+    finally:
+        logger.info("total time: %.2f sec", time.monotonic() - started)
