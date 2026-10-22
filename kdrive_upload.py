@@ -39,6 +39,7 @@ MAX_DIRECT_SIZE = 1_000_000_000  # POST /upload rejects a larger total_size; suc
 SESSION_CHUNK_SIZE = 128 * CHUNK_SIZE  # the API takes 1 MB..1 GB per chunk (the last may be smaller) and up to 10000 chunks
 UPLOAD_HOST_SUFFIX = ".infomaniak.com"
 NOT_FOUND = "object_not_found"
+ALREADY_EXISTS = "destination_already_exists"
 SERVICE_DIR = ".kdrive-sync"
 MANIFEST_NAME = "manifest.json.gz"
 MANIFEST_VERSION = 1
@@ -246,7 +247,16 @@ class KDrive:
         if self._dry_run:
             logger.info("would mkdir %s", name)
             return None
-        created = await self._call(Method.POST, f"/files/{parent_id}/directory", json={"name": name})
+        try:
+            created = await self._call(Method.POST, f"/files/{parent_id}/directory", json={"name": name})
+        except KDriveError as exc:
+            if exc.code != ALREADY_EXISTS:
+                raise
+            # the manifest is stale (e.g. an aborted run created the folder before recording it): take it from a fresh listing
+            existing = next((e for e in await self.list_dir(parent_id) if e.is_dir and e.name == name), None)
+            if existing is None:
+                raise
+            return existing.id
         return created["data"]["id"]
 
     async def ensure_path(self, parts: tuple[str, ...]) -> int | None:

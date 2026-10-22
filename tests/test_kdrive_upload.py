@@ -154,6 +154,28 @@ def test_upload_session_is_cancelled_on_failure(tmp_path, monkeypatch):
     assert drive.calls[-1][:2] == ("DELETE", "/upload/session/tok")
 
 
+class ExistingDirDrive(FakeDrive):
+    def __init__(self, root, listing):
+        super().__init__(root)
+        self.listing = listing
+
+    async def _call(self, method, path, **kwargs):
+        if method == "POST" and path.endswith("/directory"):
+            raise KDriveError("exists", "destination_already_exists")
+        return await super()._call(method, path, **kwargs)
+
+    async def list_dir(self, dir_id):
+        return self.listing
+
+
+def test_ensure_dir_takes_existing_folder_missing_from_stale_manifest(tmp_path):
+    folder = Entry(9, "sub", True, None, None)
+    assert asyncio.run(ExistingDirDrive(tmp_path, [folder]).ensure_dir(1, "sub", [])) == 9
+    file_with_same_name = Entry(10, "sub", False, 5, 1)
+    with pytest.raises(KDriveError):
+        asyncio.run(ExistingDirDrive(tmp_path, [file_with_same_name]).ensure_dir(1, "sub", []))
+
+
 def test_checkpoint_due():
     assert checkpoint_due(dirty=True, now=100, last=0, interval=60)
     assert not checkpoint_due(dirty=True, now=59, last=0, interval=60)  # too early
