@@ -34,7 +34,8 @@ import pathspec
 API = "https://api.infomaniak.com"
 ROOT_ID = 1
 DEFAULT_IGNORE_FILE = Path(__file__).with_name("kdrive.ignore")
-CHUNK_SIZE = 1 << 20
+MIB = 1 << 20
+CHUNK_SIZE = MIB
 MAX_DIRECT_SIZE = 1_000_000_000  # POST /upload rejects a larger total_size; such files go through an upload session
 SESSION_CHUNK_SIZE = 128 * CHUNK_SIZE  # the API takes 1 MB..1 GB per chunk (the last may be smaller) and up to 10000 chunks
 UPLOAD_HOST_SUFFIX = ".infomaniak.com"
@@ -158,6 +159,10 @@ def checkpoint_due(*, dirty: bool, now: float, last: float, interval: float) -> 
 def check_delete_limit(count: int, total: int, max_pct: float) -> None:
     if count * 100 > total * max_pct:
         raise KDriveError(f"refusing to delete {count} of {total} entries: more than {max_pct}% (see --max-delete-pct)")
+
+
+def format_upload(size: int, seconds: float, path: Path) -> str:
+    return f"upload {size / MIB:6.0f} Mb in {seconds:7.2f} sec {path}"
 
 
 def check_upload_url(url: str) -> str:
@@ -340,6 +345,7 @@ class KDrive:
         if self._dry_run:
             logger.info("would upload %s", path)
             return
+        started = time.monotonic()
         try:
             if item.size > MAX_DIRECT_SIZE:
                 entry = await self._upload_session(dir_id, item.name, path, item.size, item.mtime)
@@ -353,7 +359,7 @@ class KDrive:
             logger.warning("skip %s: removed or truncated during sync, next run will retry", path)
             return
         self._tree[rel][entry.name] = entry
-        logger.info("upload %s", path)
+        logger.info(format_upload(item.size, time.monotonic() - started, path))
         await self._changed()
 
     async def delete(self, rel: str, entry: Entry) -> None:

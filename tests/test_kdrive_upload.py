@@ -1,5 +1,6 @@
 import asyncio
 import gzip
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ from kdrive_upload import (
     check_upload_url,
     checkpoint_due,
     dump_manifest,
+    format_upload,
     is_current,
     parse_manifest,
     read_chunks,
@@ -181,3 +183,8 @@ def test_checkpoint_due():
     assert not checkpoint_due(dirty=True, now=59, last=0, interval=60)  # too early
     assert not checkpoint_due(dirty=False, now=100, last=0, interval=60)  # nothing to save
     assert not checkpoint_due(dirty=True, now=100, last=0, interval=0)  # 0 disables
+
+
+def test_format_upload() -> None:
+    line = format_upload(3211 * 1024 * 1024, 0.01, Path("/d/f.txt"))
+    assert line == "upload   3211 Mb in    0.01 sec /d/f.txt"
