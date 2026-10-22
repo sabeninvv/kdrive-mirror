@@ -1,0 +1,34 @@
+# Exclusion rules for kdrive_upload.py. Syntax as in .gitignore:
+#   name/     folders only;  name  files and folders;  *.ext  by pattern;
+#   /name     only in the root of the uploaded folder;  !name  re-include something excluded.
+# Paths are relative to the --src folder. An excluded folder is not walked at all.
+
+# Secrets
+.env
+.env.*
+*.session
+*.session-journal
+*.pem
+*.key
+*.tokens
+.tokens/
+
+# Restorable from dependencies, and caches
+.venv/
+venv/
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Syncthing service files
+.stfolder
+.stversions/
+.syncthing.*.tmp
+~syncthing~*.tmp
