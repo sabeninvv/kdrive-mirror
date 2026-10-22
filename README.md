@@ -158,6 +158,80 @@ uv run --env-file ~/.envs/kdrive.env kdrive_upload.py \
 - If you run without `--manifest` where a manifest already exists, the script warns that the manifest is now stale; do the next `--manifest` run with `--rescan`.
 - If a file from the manifest was already removed from the drive by hand and is also removed locally, the deletion returns an API error; run with `--rescan`.
 
+## Running on a schedule (every 600 seconds)
+
+Use the native scheduler of each system. Replace the paths with your own. `--manifest` is recommended here, so a run with no changes costs only a few requests.
+
+### Windows (Task Scheduler)
+
+Run in PowerShell:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "uv.exe" `
+  -Argument "run --env-file $env:USERPROFILE\.envs\kdrive.env kdrive_upload.py --src C:\Path\To\Folder\ --dest Private/Mirror/folder --mirror --manifest" `
+  -WorkingDirectory "C:\path\to\kdrive-mirror"
+
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+  -RepetitionInterval (New-TimeSpan -Seconds 600)
+
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable
+
+Register-ScheduledTask -TaskName "kdrive-mirror" -Action $action -Trigger $trigger -Settings $settings
+```
+
+- `-WorkingDirectory` must be the folder that contains `kdrive_upload.py`.
+- `-MultipleInstances IgnoreNew` skips a start while the previous run is still going.
+- Test with `Start-ScheduledTask kdrive-mirror`; remove with `Unregister-ScheduledTask kdrive-mirror`.
+- To run the script inside WSL instead, use `-Execute wsl.exe` and `-Argument '-e bash -lc "cd ~/projects/kdrive-mirror && uv run --env-file ~/.envs/kdrive.env kdrive_upload.py ..."'`.
+
+### macOS (launchd)
+
+Create `~/Library/LaunchAgents/com.user.kdrive-mirror.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.kdrive-mirror</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>--env-file</string>
+    <string>/Users/YOU/.envs/kdrive.env</string>
+    <string>kdrive_upload.py</string>
+    <string>--src</string>
+    <string>/Users/YOU/Sync/Docs/</string>
+    <string>--dest</string>
+    <string>Private/Mirror/docs</string>
+    <string>--mirror</string>
+    <string>--manifest</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/projects/kdrive-mirror</string>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/kdrive-mirror.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/kdrive-mirror.err</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.user.kdrive-mirror.plist     # enable
+launchctl unload ~/Library/LaunchAgents/com.user.kdrive-mirror.plist   # disable
+```
+
+- launchd does not read your shell `PATH`, so give the full path to `uv` (`which uv`).
+- launchd does not start a new run while the previous one is still running.
+- If `--src` is in a protected folder (Documents, Desktop, iCloud), grant `uv` or your terminal Full Disk Access in System Settings → Privacy & Security.
+
 ## Layout on the drive
 
 ```text
