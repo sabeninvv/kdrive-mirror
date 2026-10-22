@@ -41,7 +41,6 @@ SESSION_CHUNK_SIZE = 128 * CHUNK_SIZE  # the API takes 1 MB..1 GB per chunk (the
 UPLOAD_HOST_SUFFIX = ".infomaniak.com"
 UPLOAD_ATTEMPTS = 3
 RETRY_DELAY_SEC = 5
-RETRYABLE = (aiohttp.ServerConnectionError, aiohttp.ClientConnectorError)  # not the plain ClientConnectionError that wraps SourceChanged
 NOT_FOUND = "object_not_found"
 ALREADY_EXISTS = "destination_already_exists"
 SERVICE_DIR = ".kdrive-sync"
@@ -61,6 +60,14 @@ class KDriveError(RuntimeError):
     def __init__(self, message: str, code: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+
+
+class BadResponse(KDriveError):
+    """The body is empty or not a JSON object, e.g. a gateway answered instead of the API."""
+
+
+# not the plain ClientConnectionError that wraps SourceChanged
+RETRYABLE = (aiohttp.ServerConnectionError, aiohttp.ClientConnectorError, BadResponse)
 
 
 class SourceChanged(Exception):
@@ -232,7 +239,14 @@ class KDrive:
         self.api_calls += 1
         slot = self._slots if limited else contextlib.nullcontext()
         async with slot, self._session.request(method, url, **kwargs) as resp:
-            payload = await resp.json(content_type=None)
+            body = await resp.read()
+            status = resp.status
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            raise BadResponse(f"{method} {path}: HTTP {status}, unreadable body {body[:200]!r}")
         if payload.get("result") != "success":
             error = payload.get("error")
             raise KDriveError(f"{method} {path}: {error}", error.get("code") if isinstance(error, dict) else None)

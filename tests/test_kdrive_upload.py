@@ -9,6 +9,7 @@ import pathspec
 
 import kdrive_upload
 from kdrive_upload import (
+    BadResponse,
     Entry,
     KDrive,
     KDriveError,
@@ -210,6 +211,51 @@ def test_send_does_not_retry_api_errors(tmp_path, monkeypatch):
     with pytest.raises(KDriveError):
         asyncio.run(drive._send(1, Local("f", False, 1, 1), tmp_path / "f"))
     assert drive.attempts == 1
+
+
+class FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    async def read(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeSession:
+    def __init__(self, status, body):
+        self._response = FakeResponse(status, body)
+
+    def request(self, method, url, **kwargs):
+        return self._response
+
+
+def call_with(tmp_path, status, body):
+    drive = KDrive(FakeSession(status, body), 1, 1, tmp_path, {}, mirror=False, dry_run=False, manifest=False, checkpoint_sec=0)
+    return asyncio.run(drive._call("GET", "/x"))
+
+
+def test_call_reports_unreadable_body_as_retryable_error(tmp_path):
+    assert call_with(tmp_path, 200, b'{"result":"success","data":1}')["data"] == 1
+    for body in (b"", b"null", b"<html>502</html>"):
+        with pytest.raises(BadResponse, match="HTTP 502"):
+            call_with(tmp_path, 502, body)
+    with pytest.raises(KDriveError) as err:
+        call_with(tmp_path, 403, b'{"result":"error","error":{"code":"access_denied"}}')
+    assert not isinstance(err.value, BadResponse) and err.value.code == "access_denied"
+
+
+def test_send_retries_bad_response(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdrive_upload, "RETRY_DELAY_SEC", 0)
+    drive = FlakyDrive(tmp_path, [BadResponse("empty")])
+    assert asyncio.run(drive._send(1, Local("f", False, 1, 1), tmp_path / "f")).id == 1
+    assert drive.attempts == 2
 
 
 def test_checkpoint_due():
